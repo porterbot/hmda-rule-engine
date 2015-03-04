@@ -220,15 +220,26 @@ var accumulateResult = function(ifResult, thenResult) {
         return _USE_LOCAL_DB;
     };
 
-    HMDAEngine.loadCensusData = function(year) {
-        var apiCalls = [
-            this.apiGET('localdb/census/msaCodes'),
-            this.apiGET('localdb/census/stateCounty'),
-            this.apiGET('localdb/census/stateCountyMSA'),
-            this.apiGET('localdb/census/stateCountyTract'),
-            this.apiGET('localdb/census/stateCountyTractMSA')
-        ];
-        return Promise.map(apiCalls, function(body) {
+    HMDAEngine.loadCensusData = function() {
+        var currentEngine = this;
+        return getLocalDataFromAPI(currentEngine, 'localdb/census/stateCountyTractMSA')
+        .then(function() {
+            return getLocalDataFromAPI(currentEngine, 'localdb/census/stateCountyTract');
+        })
+        .then(function() {
+            return getLocalDataFromAPI(currentEngine, 'localdb/census/stateCountyMSA');
+        })
+        .then(function() {
+            return getLocalDataFromAPI(currentEngine, 'localdb/census/stateCounty');
+        })
+        .then(function() {
+            return getLocalDataFromAPI(currentEngine, 'localdb/census/msaCodes');
+        });
+    };
+
+    var getLocalDataFromAPI = function(currentEngine, endpoint) {
+        return currentEngine.apiGET(endpoint)
+        .then(function(body) {
             return loadDB(resultFromResponse(body));
         });
     };
@@ -236,7 +247,7 @@ var accumulateResult = function(ifResult, thenResult) {
     var resetDB = function() {
         return destroyDB()
         .then(function() {
-            _LOCAL_DB = levelup('hmda');
+            _LOCAL_DB = levelup('hmda', {valueEncoding: 'json'});
             return _LOCAL_DB;
         });
     };
@@ -248,7 +259,7 @@ var accumulateResult = function(ifResult, thenResult) {
             if (typeof levelup.destroy === 'function') {
                 levelup.destroy('hmda', function(err) {
                     if (err) {
-                        deferred.reject(err);
+                        return deferred.reject(err);
                     }
                     _LOCAL_DB = null;
                     deferred.resolve();
@@ -267,7 +278,7 @@ var accumulateResult = function(ifResult, thenResult) {
         if (_LOCAL_DB) {
             _LOCAL_DB.close(function(err) {
                 if (err) {
-                    deferred.reject(err);
+                    return deferred.reject(err);
                 }
                 realDestroy();
             });
@@ -281,14 +292,17 @@ var accumulateResult = function(ifResult, thenResult) {
         var deferred = Promise.defer();
         _LOCAL_DB.batch(data, function(err) {
             if (err) {
-                deferred.reject(err);
+                return deferred.reject(err);
             }
             deferred.resolve();
         });
         return deferred.promise;
     };
 
-    var localCensusComboValidation = function(censusparams) {
+    var localCensusComboValidation = function(censusparams, resultAsOb) {
+        if (resultAsOb === undefined) {
+            resultAsOb = false;
+        }
         var deferred = Promise.defer();
 
         var key = '/census';
@@ -300,10 +314,22 @@ var accumulateResult = function(ifResult, thenResult) {
         }
         _LOCAL_DB.get(key, function(err, value) {
             if (err && err.notFound) {
-                deferred.resolve(false);
+                value = {result:false};
+                if (resultAsOb) {
+                    return deferred.resolve(value);
+                }
+                return deferred.resolve(false);
             }
-            if (censusparams.tract === 'NA' && value !== '1') {
-                deferred.resolve(false);
+            value.result = false;
+            if (censusparams.tract === 'NA' && value.small_county !== '1') {
+                if (resultAsOb) {
+                    return deferred.resolve(value);
+                }
+                return deferred.resolve(false);
+            }
+            if (resultAsOb) {
+                value.result = true;
+                return deferred.resolve(value);
             }
             deferred.resolve(true);
         });
@@ -316,10 +342,10 @@ var accumulateResult = function(ifResult, thenResult) {
 
         var key = '/census/msa_code/' + msaCode;
         _LOCAL_DB.get(key, function(err, value) {
-            if (err && err.notFound) {
-                deferred.resolve(false);
+            if ( (err && err.notFound) || msaCode === 'NA' ) {
+                return deferred.resolve(false);
             }
-            deferred.resolve(value);
+            deferred.resolve(value.msa_name);
         });
         return deferred.promise;
     };
@@ -906,25 +932,39 @@ var accumulateResult = function(ifResult, thenResult) {
 
     /* lar-quality */
     HMDAEngine.isValidStateCountyCensusTractCombo = function(hmdaFile) {
-       var currentEngine = this,
+        var currentEngine = this,
             invalidMSAs = [];
-        return Promise.map(hmdaFile.loanApplicationRegisters, function(element) {
-            return currentEngine.apiGET('isValidCensusCombination', [element.fipsState, element.fipsCounty, element.censusTract])
-            .then(function(response) {
-                var result = resultFromResponse(response);
-                if (result.result) {
-                    if ((element.metroArea === 'NA' && result.msa_code!=='') || element.metroArea!==result.msa_code) {
-                        var error = {'properties': {}};
-                        error.properties['Recommended MSA/MD'] = result.msa_code;
-                        error.properties['LAR number'] = element.loanNumber;
-                        error.properties['Reported State Code'] = element.fipsState;
-                        error.properties['Reported County Code'] = element.fipsCounty;
-                        error.properties['Reported Census Tract'] = element.censusTract;
-                        invalidMSAs.push (error);
-                    }
+
+        var pushMSA = function(element, result) {
+            if (result.result) {
+                if ((element.metroArea === 'NA' && result.msa_code !== '') || element.metroArea !== result.msa_code) {
+                    var error = {'properties': {}};
+                    error.properties['Recommended MSA/MD'] = result.msa_code;
+                    error.properties['LAR number'] = element.loanNumber;
+                    error.properties['Reported State Code'] = element.fipsState;
+                    error.properties['Reported County Code'] = element.fipsCounty;
+                    error.properties['Reported Census Tract'] = element.censusTract;
+                    invalidMSAs.push (error);
                 }
-                return Promise.resolve();
-            });
+            }
+        };
+
+        return Promise.map(hmdaFile.loanApplicationRegisters, function(element) {
+            if (currentEngine.shouldUseLocalDB()) {
+                return localCensusComboValidation({'state_code':element.fipsState,
+                        'county_code':element.fipsCounty, 'tract': element.censusTract}, true)
+                .then(function(result) {
+                    pushMSA(element, result);
+                    return;
+                });
+            } else {
+                return currentEngine.apiGET('isValidCensusCombination', [element.fipsState, element.fipsCounty, element.censusTract])
+                .then(function(response) {
+                    var result = resultFromResponse(response);
+                    pushMSA(element, result);
+                    return;
+                });
+            }
         }, { concurrency: CONCURRENT_RULES })
         .then(function() {
             if (!invalidMSAs.length) {
@@ -938,11 +978,11 @@ var accumulateResult = function(ifResult, thenResult) {
     HMDAEngine.isMetroAreaOnRespondentPanel = function(hmdaFile) {
         var currentEngine = this,
             invalidMSAs = [];
-        return Promise.map(hmdaFile.loanApplicationRegisters, function(element) {
-            return currentEngine.apiGET('isNotIndependentMortgageCoOrMBS', [element.agencyCode, element.respondentID])
-            .then(function(response) {
-                var result = resultFromResponse(response);
-                if (result.result) {
+        return currentEngine.apiGET('isNotIndependentMortgageCoOrMBS', [hmdaFile.transmittalSheet.agencyCode, hmdaFile.transmittalSheet.respondentID])
+        .then(function(response) {
+            var result = resultFromResponse(response);
+            if (result.result === true) {
+                return Promise.map(hmdaFile.loanApplicationRegisters, function(element) {
                     var validActionTaken = ['1', '2', '3', '4', '5', '7', '8'];
                     if (_.contains(validActionTaken, element.actionTaken)) {
                         return currentEngine.apiGET('isMetroAreaOnRespondentPanel', [element.agencyCode, element.respondentID,
@@ -955,10 +995,11 @@ var accumulateResult = function(ifResult, thenResult) {
                             return resultFromResponse(response).result;
                         });
                     }
-                }
-                return Promise.resolve();
-            });
-        }, { concurrency: CONCURRENT_RULES })
+                    return Promise.resolve();
+                },  {concurrency: CONCURRENT_RULES});
+            }
+            return Promise.resolve();
+        })
         .then(function() {
             if (!invalidMSAs.length) {
                 return true;
@@ -1459,7 +1500,7 @@ var accumulateResult = function(ifResult, thenResult) {
         var currentEngine = this;
         var validityPromise;
         if (this.shouldUseLocalDB()) {
-            validityPromise = currentEngine.loadCensusData(year)
+            validityPromise = currentEngine.loadCensusData()
             .then(function() {
                 return Promise.all([
                     currentEngine.runEdits(year, 'ts', 'validity'),
