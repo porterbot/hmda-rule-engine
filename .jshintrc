@@ -64,7 +64,7 @@
     // Whether `== null` comparisons should be allowed, even if `eqeqeq` is `true`.
     "eqnull": false,
     // Whether `eval` should be allowed.
-    "evil": false,
+    "evil": true,
     // Whether ExpressionStatement should be allowed as Programs.
     "expr": true,
     // Whether `for in` loops must filter with `hasOwnPrototype`.
